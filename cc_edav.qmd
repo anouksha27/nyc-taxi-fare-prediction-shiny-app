@@ -1,0 +1,342 @@
+---
+title: "NYC Taxi Fare Prediction Using a Shiny App"
+
+---
+
+
+
+```{r}
+install.packages("data.table")
+install.packages("sf")
+install.packages("terra")
+install.packages("ggplot2")
+install.packages("rnaturalearth")
+install.packages("leaflet")
+install.packages("readr")
+install.packages("readxl")
+install.packages("lubridate")
+install.packages("dplyr")
+install.packages("dbscan")
+install.packages("caret")       
+install.packages("randomForest")
+```
+
+```{r}
+library(data.table)
+library(sf)
+library(terra)
+library(ggplot2)
+library(rnaturalearth)
+library(leaflet)
+library(readr)
+library(readxl)
+library(lubridate)
+library(dplyr)
+library(dbscan)
+library(caret)       
+library(randomForest)
+```
+
+
+
+```{r}
+taxi_trips <- fread("/Users/anouksha/Documents/edav/hw4/archive/yellow_tripdata_2016-03.csv")
+
+# Preview the data
+head(taxi_trips)
+```
+
+```{r}
+
+summary(taxi_trips)  # Summary of geometry and attributes
+head(taxi_trips)     # View the first few rows of data
+
+```
+
+```{r}
+taxi_trips <- dplyr::sample_n(taxi_trips, 100000)
+
+```
+
+
+```{r}
+names(taxi_trips)
+```
+
+
+Preprocess the Data
+```{r}
+# Convert date-time columns
+taxi_trips$tpep_pickup_datetime <- as.POSIXct(taxi_trips$tpep_pickup_datetime, format = "%Y-%m-%d %H:%M:%S")
+taxi_trips$tpep_dropoff_datetime <- as.POSIXct(taxi_trips$tpep_dropoff_datetime, format = "%Y-%m-%d %H:%M:%S")
+
+# Define NYC bounding box
+nyc_bbox <- c(min_lon = -74.25559, max_lon = -73.70001, min_lat = 40.49612, max_lat = 40.91553)
+
+# Filter based on bounding box
+taxi_trips <- taxi_trips  %>%
+  filter(
+    pickup_longitude >= nyc_bbox["min_lon"] & pickup_longitude <= nyc_bbox["max_lon"] &
+    pickup_latitude >= nyc_bbox["min_lat"] & pickup_latitude <= nyc_bbox["max_lat"] &
+    dropoff_longitude >= nyc_bbox["min_lon"] & dropoff_longitude <= nyc_bbox["max_lon"] &
+    dropoff_latitude >= nyc_bbox["min_lat"] & dropoff_latitude <= nyc_bbox["max_lat"]
+  )
+
+```
+
+
+
+Create Time-Based Features for Peak Hour Analysis
+```{r}
+#Create Time-Based Features for Peak Hour Analysis
+# Extract hour and day of the week from pickup time
+taxi_trips <- taxi_trips %>%
+  mutate(
+    pickup_hour = hour(tpep_pickup_datetime),
+    pickup_day = weekdays(tpep_pickup_datetime)
+  )
+
+```
+
+
+```{r}
+# Load necessary libraries
+library(leaflet)
+library(dplyr)
+
+# Filter the data if needed to focus on high-density areas (optional)
+# For example, filtering trips in Manhattan or specific coordinates
+high_demand_pickups <- taxi_trips %>% 
+  filter(pickup_longitude > -74.05 & pickup_longitude < -73.75, 
+         pickup_latitude > 40.6 & pickup_latitude < 40.9)
+
+# Create a leaflet map with pickup locations as data points
+leaflet(data = high_demand_pickups) %>%
+  addTiles() %>%
+  addCircleMarkers(~pickup_longitude, ~pickup_latitude,
+                   color = "red",
+                   radius = 1,
+                   fillOpacity = 0.4,
+                   label = ~paste("Pickup at:", pickup_longitude, pickup_latitude)) %>%
+  addProviderTiles(providers$Stamen.TonerLite) %>%
+  setView(lng = -73.9857, lat = 40.7484, zoom = 12)
+
+```
+
+
+```{r}
+# Add a simple legend
+leaflet(data = high_demand_pickups) %>%
+  addTiles() %>%
+  addCircleMarkers(~pickup_longitude, ~pickup_latitude,
+                   color = "red",
+                   radius = 1,
+                   fillOpacity = 0.4,
+                   label = ~paste("Pickup at:", pickup_longitude, pickup_latitude)) %>%
+  addProviderTiles(providers$Stamen.TonerLite) %>%
+  setView(lng = -73.9857, lat = 40.7484, zoom = 12) %>%
+  addLegend(position = "bottomright", colors = "red", labels = "Pickup Locations", title = "Legend")
+
+```
+
+
+
+Visualize High-Demand Pickup and Dropoff Areas
+```{r}
+
+# Plot pickup locations
+ggplot(taxi_trips, aes(x = pickup_longitude, y = pickup_latitude)) +
+  geom_density_2d_filled(alpha = 0.5) +
+  coord_fixed() +
+  labs(title = "Density of NYC Taxi Pickup Locations", x = "Longitude", y = "Latitude")
+
+```
+
+```{r}
+# Plot dropoff locations
+ggplot(taxi_trips, aes(x = dropoff_longitude, y = dropoff_latitude)) +
+  geom_density_2d_filled(alpha = 0.5) +
+  coord_fixed() +
+  labs(title = "Density of NYC Taxi Dropoff Locations", x = "Longitude", y = "Latitude")
+```
+
+
+
+Analyze Peak Hours
+```{r}
+# Count trips by hour of day
+trips_by_hour <- taxi_trips %>%
+  group_by(pickup_hour) %>%
+  summarise(trip_count = n())
+
+# Plot trips by hour of day
+ggplot(trips_by_hour, aes(x = pickup_hour, y = trip_count)) +
+  geom_line(color = "blue") +
+  labs(title = "Number of Trips by Hour of Day", x = "Hour of Day", y = "Trip Count")
+```
+
+
+
+
+Clustering High-Demand Areas with DBSCAN
+```{r}
+# Prepare data for clustering (selecting a sample to reduce computational load)
+sampled_trips <- taxi_trips %>% sample_n(10000)
+pickup_coords <- sampled_trips %>% select(pickup_longitude, pickup_latitude)
+
+# Run DBSCAN clustering
+db <- dbscan(pickup_coords, eps = 0.01, minPts = 5)  # Adjust eps and minPts as needed
+
+# Add cluster labels to the data
+sampled_trips$cluster <- as.factor(db$cluster)
+
+# Visualize clusters on a scatter plot
+ggplot(sampled_trips, aes(x = pickup_longitude, y = pickup_latitude, color = cluster)) +
+  geom_point(alpha = 0.6, size = 0.5) +
+  coord_fixed() +
+  labs(title = "DBSCAN Clustering of High-Demand Pickup Locations", x = "Longitude", y = "Latitude")
+```
+
+
+Interactive Map with Leaflet
+```{r}
+# Sample for visualization
+sampled_trips_leaflet <- taxi_trips %>% sample_n(500)
+
+leaflet(sampled_trips_leaflet) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~pickup_longitude, lat = ~pickup_latitude,
+    radius = 2, color = "blue", fillOpacity = 0.5,
+    label = ~paste("Fare Amount:", fare_amount)
+  ) %>%
+  addCircleMarkers(
+    lng = ~dropoff_longitude, lat = ~dropoff_latitude,
+    radius = 2, color = "red", fillOpacity = 0.5,
+    label = ~paste("Fare Amount:", fare_amount)
+  ) %>%
+  addLegend("topright", colors = c("blue", "red"), labels = c("Pickup", "Dropoff"), title = "Trip Locations")
+```
+
+
+```{r}
+
+# install.packages("caret")       # For machine learning workflows, including model training and evaluation
+   # For working with date and time data
+# install.packages("randomForest")
+
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(randomForest)
+
+# Load dataset (assuming your dataset is named 'taxi_data')
+# taxi_data <- read.csv("path_to_your_file.csv")
+
+# Data Preprocessing
+# Convert datetime columns to DateTime format
+taxi_trips$tpep_pickup_datetime <- as.POSIXct(taxi_trips$tpep_pickup_datetime, format = "%Y-%m-%d %H:%M:%S")
+taxi_trips$tpep_dropoff_datetime <- as.POSIXct(taxi_trips$tpep_dropoff_datetime, format = "%Y-%m-%d %H:%M:%S")
+
+# Create new features
+taxi_trips$pickup_hour <- hour(taxi_trips$tpep_pickup_datetime)
+taxi_trips$pickup_day <- weekdays(taxi_trips$tpep_pickup_datetime)
+
+# Handle missing values
+taxi_trips <- taxi_trips %>%
+  drop_na(fare_amount, trip_distance, passenger_count, pickup_longitude, pickup_latitude,
+          dropoff_longitude, dropoff_latitude, payment_type, RatecodeID, store_and_fwd_flag)
+
+# Convert categorical features to factors
+taxi_trips$payment_type <- factor(taxi_trips$payment_type)
+taxi_trips$store_and_fwd_flag <- factor(taxi_trips$store_and_fwd_flag)
+taxi_trips$RatecodeID <- factor(taxi_trips$RatecodeID)
+
+# One-hot encode categorical variables if needed
+# Step 1: Convert columns to factors
+taxi_trips <- taxi_trips %>%
+  mutate(across(c(payment_type, store_and_fwd_flag, RatecodeID), as.factor))
+
+# Step 2: Use model.matrix on the entire data frame
+taxi_trips_matrix <- model.matrix(~ . - 1, data = taxi_trips)
+
+
+# Define the target variables
+taxi_trips$y1 <- taxi_trips$fare_amount
+taxi_trips$y2 <- taxi_trips$extra + taxi_trips$mta_tax
+taxi_trips$y3 <- taxi_trips$tip_amount
+taxi_trips$y_final <- taxi_trips$y1 + taxi_trips$y2 + taxi_trips$y3
+
+# Remove original target columns (fare_amount, extra, mta_tax, tip_amount)
+taxi_trips <- taxi_trips %>%
+  select(-c(fare_amount, extra, mta_tax, tip_amount))
+
+# Train-test split
+set.seed(42)
+trainIndex <- createDataPartition(taxi_trips$y_final, p = 0.8, list = FALSE)
+train_data <- taxi_trips[trainIndex, ]
+test_data <- taxi_trips[-trainIndex, ]
+
+# Model Training (Random Forest Regression)
+rf_model_y1 <- randomForest(y1 ~ ., data = train_data, ntree = 500)
+rf_model_y2 <- randomForest(y2 ~ ., data = train_data, ntree = 500)
+rf_model_y3 <- randomForest(y3 ~ ., data = train_data, ntree = 500)
+
+# Model Evaluation
+predictions_y1 <- predict(rf_model_y1, newdata = test_data)
+predictions_y2 <- predict(rf_model_y2, newdata = test_data)
+predictions_y3 <- predict(rf_model_y3, newdata = test_data)
+
+# Combine predictions to get the final prediction (y_final)
+final_predictions <- predictions_y1 + predictions_y2 + predictions_y3
+
+# Actual values for y_final
+actuals_y_final <- test_data$y_final
+
+# Calculate RMSE and R-squared for the final prediction
+rmse <- sqrt(mean((final_predictions - actuals_y_final)^2))
+r_squared <- 1 - sum((final_predictions - actuals_y_final)^2) / sum((actuals_y_final - mean(actuals_y_final))^2)
+
+cat("RMSE for final prediction:", rmse, "\n")
+cat("R-squared for final prediction:", r_squared, "\n")
+
+# Optional: Plot predictions vs actuals
+plot(final_predictions, actuals_y_final, main = "Predicted vs Actual y_final", xlab = "Predicted", ylab = "Actual")
+abline(0, 1, col = "red")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
